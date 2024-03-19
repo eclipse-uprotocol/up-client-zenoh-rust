@@ -2,7 +2,7 @@
 
 Rust UPClient implementation for the Zenoh transport
 
-# Build
+## Build
 
 ```shell
 # Check clippy
@@ -13,6 +13,10 @@ cargo build
 cargo test
 ```
 
-# Note
+## Examples
+
+The examples of using up-client-zenoh-rust can be found in [up-zenoh-example-rust](https://github.com/eclipse-uprotocol/up-zenoh-example-rust).
+
+## Note
 
 The implementation follows the spec defined in [up-l1/zenoh](https://github.com/eclipse-uprotocol/up-spec/blob/main/up-l1/zenoh.adoc).
