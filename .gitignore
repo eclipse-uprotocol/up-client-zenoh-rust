@@ -3,3 +3,5 @@ target
 
 # Ignore Cargo.lock while building libraries
 Cargo.lock
+
+.idea/

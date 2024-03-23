@@ -15,11 +15,15 @@ pub mod rpc;
 pub mod utransport;
 
 use protobuf::{Enum, Message};
+use std::collections::HashSet;
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicU64, Arc, Mutex},
+    sync::{Arc, Mutex},
 };
-use up_rust::uprotocol::{UAttributes, UCode, UMessage, UPayloadFormat, UPriority, UStatus, UUri};
+use up_rust::ComparableListener;
+use up_rust::{
+    UAttributes, UAuthority, UCode, UEntity, UPayloadFormat, UPriority, UStatus, UUIDBuilder, UUri,
+};
 use zenoh::{
     config::Config,
     prelude::r#async::*,
@@ -28,28 +32,38 @@ use zenoh::{
     subscriber::Subscriber,
 };
 
-pub type UtransportListener = Box<dyn Fn(Result<UMessage, UStatus>) + Send + Sync + 'static>;
-
 const UATTRIBUTE_VERSION: u8 = 1;
 
 pub struct ZenohListener {}
+type SubscriberMap = Arc<Mutex<HashMap<(UUri, ComparableListener), Subscriber<'static, ()>>>>;
+type QueryableMap = Arc<Mutex<HashMap<(UUri, ComparableListener), Queryable<'static, ()>>>>;
+type RpcCallbackMap = Arc<Mutex<HashMap<UUri, HashSet<Arc<ComparableListener>>>>>;
 pub struct UPClientZenoh {
     session: Arc<Session>,
     // Able to unregister Subscriber
-    subscriber_map: Arc<Mutex<HashMap<String, Subscriber<'static, ()>>>>,
+    subscriber_map: SubscriberMap,
     // Able to unregister Queryable
-    queryable_map: Arc<Mutex<HashMap<String, Queryable<'static, ()>>>>,
+    queryable_map: QueryableMap,
     // Save the reqid to be able to send back response
     query_map: Arc<Mutex<HashMap<String, Query>>>,
     // Save the callback for RPC response
-    rpc_callback_map: Arc<Mutex<HashMap<String, Arc<UtransportListener>>>>,
-    callback_counter: AtomicU64,
+    rpc_callback_map: RpcCallbackMap,
+    // used to be able to stamp requests consistently from within invoke_method()
+    uuid_builder: UUIDBuilder,
+    // used on to form our source UUri when calling invoke_method()
+    authority: UAuthority,
+    // used to form our source UUri when calling invoke_method()
+    entity: UEntity,
 }
 
 impl UPClientZenoh {
     /// # Errors
     /// Will return `Err` if unable to create Zenoh session
-    pub async fn new(config: Config) -> Result<UPClientZenoh, UStatus> {
+    pub async fn new(
+        config: Config,
+        authority: UAuthority,
+        entity: UEntity,
+    ) -> Result<UPClientZenoh, UStatus> {
         let Ok(session) = zenoh::open(config).res().await else {
             return Err(UStatus::fail_with_code(
                 UCode::INTERNAL,
@@ -62,7 +76,9 @@ impl UPClientZenoh {
             queryable_map: Arc::new(Mutex::new(HashMap::new())),
             query_map: Arc::new(Mutex::new(HashMap::new())),
             rpc_callback_map: Arc::new(Mutex::new(HashMap::new())),
-            callback_counter: AtomicU64::new(0),
+            uuid_builder: UUIDBuilder::new(),
+            authority,
+            entity,
         })
     }
 
@@ -180,7 +196,7 @@ impl UPClientZenoh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use up_rust::uprotocol::{uri::uauthority::Number, UAuthority, UEntity, UResource, UUri};
+    use up_rust::{Number, UAuthority, UEntity, UResource, UUri};
 
     #[test]
     fn test_to_zenoh_key_string() {

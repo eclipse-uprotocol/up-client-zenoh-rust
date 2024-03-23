@@ -20,5 +20,8 @@ log = "0.4.17"
 prost = "0.12"
 prost-types = "0.12"
 protobuf = { version = "3.3" }
-up-rust = { git = "https://github.com/eclipse-uprotocol/up-rust", rev = "68c8a1d94f0006daf4ba135c9cbbfddcd793108d" }
+# upstream
+# up-rust = { git = "https://github.com/eclipse-uprotocol/up-rust", rev = "68c8a1d94f0006daf4ba135c9cbbfddcd793108d" }
+# feature/ulistener_generics
+up-rust = { git = "https://github.com/PLeVasseur/uprotocol-rust_fork", branch = "feature/ulistener_instance_specific" }
 zenoh = { version = "0.10.1-rc", features = ["unstable"]}
