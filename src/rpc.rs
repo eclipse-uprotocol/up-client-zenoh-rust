@@ -15,11 +15,8 @@ use crate::UPClientZenoh;
 use async_trait::async_trait;
 use std::{string::ToString, time::Duration};
 use up_rust::{
-    rpc::{CallOptions, RpcClient, RpcClientResult, RpcMapperError, RpcServer},
-    transport::{builder::UMessageBuilder, datamodel::UTransport},
-    uprotocol::{Data, UMessage, UPayload, UStatus, UUri},
-    uri::{builder::resourcebuilder::UResourceBuilder, validator::UriValidator},
-    uuid::builder::UUIDBuilder,
+    CallOptions, Data, RpcClient, RpcClientResult, RpcMapperError, UAttributes, UMessage, UPayload,
+    UUIDBuilder, UUri, UriValidator,
 };
 use zenoh::prelude::r#async::*;
 
@@ -32,91 +29,77 @@ impl RpcClient for UPClientZenoh {
         options: CallOptions,
     ) -> RpcClientResult {
         // Validate UUri
-        UriValidator::validate(&topic)
-            .map_err(|_| RpcMapperError::UnexpectedError(String::from("Wrong UUri")))?;
+        UriValidator::validate(&topic).map_err(|_| {
+            let msg = "Invalid UUri for invoke_method".to_string();
+            log::error!("{msg}");
+            RpcMapperError::UnexpectedError(msg)
+        })?;
 
         // Get Zenoh key
         let Ok(zenoh_key) = UPClientZenoh::to_zenoh_key_string(&topic) else {
-            return Err(RpcMapperError::UnexpectedError(String::from(
-                "Unable to transform to Zenoh key",
-            )));
+            let msg = "Unable to transform UUri to Zenoh key".to_string();
+            log::error!("{msg}");
+            return Err(RpcMapperError::UnexpectedError(msg));
+        };
+
+        // Create UAttributes and put into Zenoh user attachment
+        let uuid_builder = UUIDBuilder::new();
+        let mut uattributes = UAttributes::request(
+            uuid_builder.build(),
+            topic,
+            self.get_response_uuri(),
+            options.clone(),
+        );
+        // TODO: We should not have reqid here, but validate Request will fail
+        uattributes.reqid = Some(uuid_builder.build()).into();
+        // Put into attachment
+        let Ok(attachment) = UPClientZenoh::uattributes_to_attachment(&uattributes) else {
+            let msg = "Unable to transform UAttributes to user attachment in Zenoh".to_string();
+            log::error!("{msg}");
+            return Err(RpcMapperError::UnexpectedError(msg));
         };
 
         // Get the data from UPayload
         let Some(Data::Value(buf)) = payload.data else {
             // Assume we only have Value here, no reference for shared memory
-            return Err(RpcMapperError::InvalidPayload(String::from(
-                "The data in UPayload should be Data::Value",
-            )));
+            let msg = "The data in UPayload should be Data::Value".to_string();
+            log::error!("{msg}");
+            return Err(RpcMapperError::InvalidPayload(msg));
         };
-
-        // Generate UAttributes
-        let uuid_builder = UUIDBuilder::new();
-        let reqid = UUIDBuilder::new().build();
-        // Create response address
-        let mut source = topic.clone();
-        source.resource = Some(UResourceBuilder::for_rpc_response()).into();
-        // Create UMessage
-        let umessage = if let Some(token) = options.token() {
-            UMessageBuilder::request(&topic, &source, &reqid, options.timeout())
-                .with_token(&token.to_string())
-                .build(&uuid_builder)
-        } else {
-            UMessageBuilder::request(&topic, &source, &reqid, options.timeout())
-                .build(&uuid_builder)
-        };
-        // Extract uAttributes
-        let Ok(UMessage {
-            attributes: uattributes,
-            ..
-        }) = umessage
-        else {
-            return Err(RpcMapperError::UnexpectedError(String::from(
-                "Unable to create uAttributes",
-            )));
-        };
-        // Put into attachment
-        let Ok(attachment) = UPClientZenoh::uattributes_to_attachment(&uattributes) else {
-            return Err(RpcMapperError::UnexpectedError(String::from(
-                "Invalid uAttributes",
-            )));
-        };
-
         let value = Value::new(buf.into()).encoding(Encoding::WithSuffix(
             KnownEncoding::AppCustom,
             payload.format.value().to_string().into(),
         ));
-        // TODO: Query should support .encoding
+
+        // Send the query
         let getbuilder = self
             .session
             .get(&zenoh_key)
             .with_value(value)
             .with_attachment(attachment.build())
             .target(QueryTarget::BestMatching)
-            .timeout(Duration::from_millis(u64::from(options.timeout())));
-
-        // Send the query
+            .timeout(Duration::from_millis(u64::from(options.ttl)));
         let Ok(replies) = getbuilder.res().await else {
-            return Err(RpcMapperError::UnexpectedError(String::from(
-                "Error while sending Zenoh query",
-            )));
+            let msg = "Error while sending Zenoh query".to_string();
+            log::error!("{msg}");
+            return Err(RpcMapperError::UnexpectedError(msg));
         };
 
+        // Receive the reply
         let Ok(reply) = replies.recv_async().await else {
-            return Err(RpcMapperError::UnexpectedError(String::from(
-                "Error while receiving Zenoh reply",
-            )));
+            let msg = "Error while receiving Zenoh reply".to_string();
+            log::error!("{msg}");
+            return Err(RpcMapperError::UnexpectedError(msg));
         };
         match reply.sample {
             Ok(sample) => {
                 let Some(encoding) = UPClientZenoh::to_upayload_format(&sample.encoding) else {
-                    return Err(RpcMapperError::UnexpectedError(String::from(
-                        "Error while parsing Zenoh encoding",
-                    )));
+                    let msg = "Error while parsing Zenoh encoding".to_string();
+                    log::error!("{msg}");
+                    return Err(RpcMapperError::UnexpectedError(msg));
                 };
-                // TODO: Need to check attributes is correct or not
                 Ok(UMessage {
-                    attributes: uattributes,
+                    attributes: Some(uattributes).into(),
                     payload: Some(UPayload {
                         length: Some(0),
                         format: encoding.into(),
@@ -127,24 +110,11 @@ impl RpcClient for UPClientZenoh {
                     ..Default::default()
                 })
             }
-            Err(e) => Err(RpcMapperError::UnexpectedError(format!(
-                "Error while parsing Zenoh reply: {e:?}"
-            ))),
+            Err(e) => {
+                let msg = format!("Error while parsing Zenoh reply: {e:?}");
+                log::error!("{msg}");
+                Err(RpcMapperError::UnexpectedError(msg))
+            }
         }
-    }
-}
-
-#[async_trait]
-impl RpcServer for UPClientZenoh {
-    async fn register_rpc_listener(
-        &self,
-        method: UUri,
-        listener: Box<dyn Fn(Result<UMessage, UStatus>) + Send + Sync + 'static>,
-    ) -> Result<String, UStatus> {
-        self.register_listener(method, listener).await
-    }
-
-    async fn unregister_rpc_listener(&self, method: UUri, listener: &str) -> Result<(), UStatus> {
-        self.unregister_listener(method, listener).await
     }
 }
