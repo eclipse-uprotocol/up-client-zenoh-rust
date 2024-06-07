@@ -16,9 +16,7 @@ use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 use test_case::test_case;
 use tokio::time::{sleep, Duration};
-use up_rust::{
-    Data, UListener, UMessage, UMessageBuilder, UPayloadFormat, UStatus, UTransport, UUri,
-};
+use up_rust::{UListener, UMessage, UMessageBuilder, UPayloadFormat, UStatus, UTransport, UUri};
 
 struct DelayListener {
     recv_data: Arc<Mutex<String>>,
@@ -36,16 +34,13 @@ impl DelayListener {
 #[async_trait]
 impl UListener for DelayListener {
     async fn on_receive(&self, msg: UMessage) {
-        if let Data::Value(v) = msg.payload.unwrap().data.unwrap() {
-            let value = v.into_iter().map(|c| c as char).collect::<String>();
-            // Delay the receive time of the first message
-            if value == "Pub 0" {
-                sleep(Duration::from_millis(3000)).await;
-            }
-            *self.recv_data.lock().unwrap() = value;
-        } else {
-            panic!("The message should be Data::Value type.");
+        let payload = msg.payload.unwrap();
+        let value = payload.into_iter().map(|c| c as char).collect::<String>();
+        // Delay the receive time of the first message
+        if value == "Pub 0" {
+            sleep(Duration::from_millis(3000)).await;
         }
+        *self.recv_data.lock().unwrap() = value;
     }
     async fn on_error(&self, err: UStatus) {
         panic!("Internal Error: {err:?}");
@@ -53,19 +48,23 @@ impl UListener for DelayListener {
 }
 
 // The test is used to check whether blocking user callback will affect receiving messages
-#[test_case(test_lib::create_utransport_uuri(Some(4), 4, 4); "Normal UUri")]
+#[test_case(&test_lib::new_uuri("nonblock_pub", 1, 1, 0x8000); "Normal UUri")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_blocking_user_callback(pub_uuri: UUri) {
+async fn test_blocking_user_callback(pub_uuri: &UUri) {
     test_lib::before_test();
 
     // Initialization
-    let upclient_send = test_lib::create_up_client_zenoh(4, 4).await.unwrap();
-    let upclient_recv = test_lib::create_up_client_zenoh(5, 5).await.unwrap();
+    let upclient_send = test_lib::create_up_client_zenoh("nonblock_pub")
+        .await
+        .unwrap();
+    let upclient_recv = test_lib::create_up_client_zenoh("nonblock_sub")
+        .await
+        .unwrap();
 
     // Register the listener
     let pub_listener = Arc::new(DelayListener::new());
     upclient_recv
-        .register_listener(pub_uuri.clone(), pub_listener.clone())
+        .register_listener(pub_uuri, None, pub_listener.clone())
         .await
         .unwrap();
     // Waiting for listener to take effect
@@ -73,16 +72,10 @@ async fn test_blocking_user_callback(pub_uuri: UUri) {
 
     // Send 2 UMessage
     let umsg0 = UMessageBuilder::publish(pub_uuri.clone())
-        .build_with_payload(
-            "Pub 0".as_bytes().to_vec().into(),
-            UPayloadFormat::UPAYLOAD_FORMAT_TEXT,
-        )
+        .build_with_payload("Pub 0", UPayloadFormat::UPAYLOAD_FORMAT_TEXT)
         .unwrap();
     let umsg1 = UMessageBuilder::publish(pub_uuri.clone())
-        .build_with_payload(
-            "Pub 1".as_bytes().to_vec().into(),
-            UPayloadFormat::UPAYLOAD_FORMAT_TEXT,
-        )
+        .build_with_payload("Pub 1", UPayloadFormat::UPAYLOAD_FORMAT_TEXT)
         .unwrap();
     upclient_send.send(umsg0).await.unwrap();
     upclient_send.send(umsg1).await.unwrap();
@@ -97,7 +90,7 @@ async fn test_blocking_user_callback(pub_uuri: UUri) {
 
     // Cleanup
     upclient_recv
-        .unregister_listener(pub_uuri.clone(), pub_listener)
+        .unregister_listener(pub_uuri, None, pub_listener)
         .await
         .unwrap();
 }

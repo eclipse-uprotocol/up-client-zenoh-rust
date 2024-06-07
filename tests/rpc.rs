@@ -22,8 +22,7 @@ use tokio::{
 };
 use up_client_zenoh::UPClientZenoh;
 use up_rust::{
-    CallOptions, Data, RpcClient, UListener, UMessage, UMessageBuilder, UPayload, UPayloadFormat,
-    UStatus, UTransport, UUri,
+    RpcClient, UListener, UMessage, UMessageBuilder, UPayloadFormat, UStatus, UTransport, UUri,
 };
 
 struct RequestListener {
@@ -49,16 +48,16 @@ impl UListener for RequestListener {
             ..
         } = msg;
         // Check the payload of request
-        if let Data::Value(v) = payload.unwrap().data.unwrap() {
-            let value = v.into_iter().map(|c| c as char).collect::<String>();
-            assert_eq!(self.request_data, value);
-        } else {
-            panic!("The message should be Data::Value type.");
-        }
+        let value = payload
+            .unwrap()
+            .into_iter()
+            .map(|c| c as char)
+            .collect::<String>();
+        assert_eq!(self.request_data, value);
         // Send back result
         let umessage = UMessageBuilder::response_for_request(&attributes)
             .build_with_payload(
-                self.response_data.as_bytes().to_vec().into(),
+                self.response_data.clone(),
                 UPayloadFormat::UPAYLOAD_FORMAT_TEXT,
             )
             .unwrap();
@@ -91,27 +90,32 @@ impl UListener for ResponseListener {
     async fn on_receive(&self, msg: UMessage) {
         let UMessage { payload, .. } = msg;
         // Check the response data
-        if let Data::Value(v) = payload.unwrap().data.unwrap() {
-            let value = v.into_iter().map(|c| c as char).collect::<String>();
-            *self.response_data.lock().unwrap() = value;
-        } else {
-            panic!("The message should be Data::Value type.");
-        }
+        let value = payload
+            .unwrap()
+            .into_iter()
+            .map(|c| c as char)
+            .collect::<String>();
+        *self.response_data.lock().unwrap() = value;
     }
     async fn on_error(&self, err: UStatus) {
         panic!("Internal Error: {err:?}");
     }
 }
 
-#[test_case(test_lib::create_rpcserver_uuri(Some(7), 7), test_lib::create_rpcserver_uuri(Some(7), 7); "Normal RPC UUri")]
-#[test_case(test_lib::create_rpcserver_uuri(Some(7), 7), test_lib::create_special_uuri(7); "Special listen UUri")]
+#[test_case(&test_lib::new_uuri("requester", 1, 1, 0), &test_lib::new_uuri("responder", 2, 1, 1), &test_lib::new_uuri("*", 0xFFFF, 0xFF, 0xFFFF), Some(&test_lib::new_uuri("responder", 2, 1, 1)); "Any source UUri")]
+#[test_case(&test_lib::new_uuri("requester", 1, 1, 0), &test_lib::new_uuri("responder", 2, 1, 1), &test_lib::new_uuri("requester", 1, 1, 0), Some(&test_lib::new_uuri("responder", 2, 1, 1)); "Specific source UUri")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_rpc_server_client(dst_uuri: UUri, listen_uuri: UUri) {
+async fn test_rpc_server_client(
+    src_uuri: &UUri,
+    sink_uuri: &UUri,
+    src_filter: &UUri,
+    sink_filter: Option<&UUri>,
+) {
     test_lib::before_test();
 
     // Initialization
-    let upclient_client = test_lib::create_up_client_zenoh(6, 6).await.unwrap();
-    let upclient_server = Arc::new(test_lib::create_up_client_zenoh(7, 7).await.unwrap());
+    let upclient_client = test_lib::create_up_client_zenoh("requester").await.unwrap();
+    let upclient_server = Arc::new(test_lib::create_up_client_zenoh("responder").await.unwrap());
     let request_data = String::from("This is the request data");
     let response_data = String::from("This is the response data");
 
@@ -122,7 +126,7 @@ async fn test_rpc_server_client(dst_uuri: UUri, listen_uuri: UUri) {
         response_data.clone(),
     ));
     upclient_server
-        .register_listener(listen_uuri.clone(), request_listener.clone())
+        .register_listener(src_filter, sink_filter, request_listener.clone())
         .await
         .unwrap();
     // Need some time for queryable to run
@@ -130,47 +134,33 @@ async fn test_rpc_server_client(dst_uuri: UUri, listen_uuri: UUri) {
 
     // Send Request with invoke_method
     {
-        let payload = UPayload {
-            format: UPayloadFormat::UPAYLOAD_FORMAT_TEXT.into(),
-            data: Some(Data::Value(request_data.as_bytes().to_vec())),
-            ..Default::default()
-        };
         let result = upclient_client
             .invoke_method(
-                dst_uuri.clone(),
-                payload,
-                CallOptions {
-                    ttl: 1000,
-                    ..Default::default()
-                },
+                (*sink_uuri).clone(),
+                UMessageBuilder::request((*sink_uuri).clone(), (*src_uuri).clone(), 1000)
+                    .build_with_payload(request_data.clone(), UPayloadFormat::UPAYLOAD_FORMAT_TEXT)
+                    .unwrap(),
             )
             .await;
 
         // Process the result
-        if let Data::Value(v) = result.unwrap().payload.unwrap().data.unwrap() {
-            let value = v.into_iter().map(|c| c as char).collect::<String>();
-            assert_eq!(response_data.clone(), value);
-        } else {
-            panic!("Failed to get result from invoke_method.");
-        }
+        let payload = result.unwrap().payload.unwrap();
+        let value = payload.into_iter().map(|c| c as char).collect::<String>();
+        assert_eq!(response_data.clone(), value);
     }
 
     // Send Request with send
     {
         // Register Response callback
-        let response_uuri = upclient_client.get_response_uuri();
         let response_listener = Arc::new(ResponseListener::new());
         upclient_client
-            .register_listener(response_uuri.clone(), response_listener.clone())
+            .register_listener(sink_uuri, Some(src_uuri), response_listener.clone())
             .await
             .unwrap();
 
         // Send request
-        let umessage = UMessageBuilder::request(dst_uuri.clone(), response_uuri.clone(), 1000)
-            .build_with_payload(
-                request_data.as_bytes().to_vec().into(),
-                UPayloadFormat::UPAYLOAD_FORMAT_TEXT,
-            )
+        let umessage = UMessageBuilder::request((*sink_uuri).clone(), (*src_uuri).clone(), 1000)
+            .build_with_payload(request_data.clone(), UPayloadFormat::UPAYLOAD_FORMAT_TEXT)
             .unwrap();
         upclient_client.send(umessage).await.unwrap();
 
@@ -182,14 +172,14 @@ async fn test_rpc_server_client(dst_uuri: UUri, listen_uuri: UUri) {
 
         // Cleanup
         upclient_client
-            .unregister_listener(response_uuri.clone(), response_listener.clone())
+            .unregister_listener(sink_uuri, Some(src_uuri), response_listener.clone())
             .await
             .unwrap();
     }
 
     // Cleanup
     upclient_server
-        .unregister_listener(listen_uuri.clone(), request_listener.clone())
+        .unregister_listener(src_filter, sink_filter, request_listener.clone())
         .await
         .unwrap();
 }

@@ -16,9 +16,7 @@ use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 use test_case::test_case;
 use tokio::time::{sleep, Duration};
-use up_rust::{
-    Data, UListener, UMessage, UMessageBuilder, UPayloadFormat, UStatus, UTransport, UUri,
-};
+use up_rust::{UListener, UMessage, UMessageBuilder, UPayloadFormat, UStatus, UTransport, UUri};
 
 struct PublishNotificationListener {
     recv_data: Arc<Mutex<String>>,
@@ -36,44 +34,40 @@ impl PublishNotificationListener {
 #[async_trait]
 impl UListener for PublishNotificationListener {
     async fn on_receive(&self, msg: UMessage) {
-        if let Data::Value(v) = msg.payload.unwrap().data.unwrap() {
-            let value = v.into_iter().map(|c| c as char).collect::<String>();
-            *self.recv_data.lock().unwrap() = value;
-        } else {
-            panic!("The message should be Data::Value type.");
-        }
+        let data = msg.payload.unwrap();
+        let value = data.into_iter().map(|c| c as char).collect::<String>();
+        *self.recv_data.lock().unwrap() = value;
     }
     async fn on_error(&self, err: UStatus) {
         panic!("Internal Error: {err:?}");
     }
 }
 
-#[test_case(test_lib::create_utransport_uuri(Some(0), 0, 0), test_lib::create_utransport_uuri(Some(0), 0, 0); "Normal UUri")]
-#[test_case(test_lib::create_utransport_uuri(Some(0), 0, 0), test_lib::create_special_uuri(0); "Special UUri")]
+#[test_case(&test_lib::new_uuri("publisher", 1, 1, 0x8000), &test_lib::new_uuri("publisher", 1, 1, 0x8000); "Normal UUri")]
+#[test_case(&test_lib::new_uuri("publisher", 2, 1, 0x8001), &test_lib::new_uuri("publisher", 0xFFFF, 0xFF, 0xFFFF); "Special UUri")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_publish_and_subscribe(publish_uuri: UUri, listen_uuri: UUri) {
+async fn test_publish_and_subscribe(publish_uuri: &UUri, listen_uuri: &UUri) {
     test_lib::before_test();
 
     // Initialization
     let target_data = String::from("Hello World!");
-    let upclient_send = test_lib::create_up_client_zenoh(0, 0).await.unwrap();
-    let upclient_recv = test_lib::create_up_client_zenoh(1, 1).await.unwrap();
+    let upclient_send = test_lib::create_up_client_zenoh("publisher").await.unwrap();
+    let upclient_recv = test_lib::create_up_client_zenoh("subscriber")
+        .await
+        .unwrap();
 
     // Register the listener
     let pub_listener = Arc::new(PublishNotificationListener::new());
     upclient_recv
-        .register_listener(listen_uuri.clone(), pub_listener.clone())
+        .register_listener(listen_uuri, None, pub_listener.clone())
         .await
         .unwrap();
     // Waiting for listener to take effect
     sleep(Duration::from_millis(1000)).await;
 
     // Send UMessage
-    let umessage = UMessageBuilder::publish(publish_uuri.clone())
-        .build_with_payload(
-            target_data.as_bytes().to_vec().into(),
-            UPayloadFormat::UPAYLOAD_FORMAT_TEXT,
-        )
+    let umessage = UMessageBuilder::publish((*publish_uuri).clone())
+        .build_with_payload(target_data.clone(), UPayloadFormat::UPAYLOAD_FORMAT_TEXT)
         .unwrap();
     upclient_send.send(umessage).await.unwrap();
 
@@ -85,39 +79,41 @@ async fn test_publish_and_subscribe(publish_uuri: UUri, listen_uuri: UUri) {
 
     // Cleanup
     upclient_recv
-        .unregister_listener(listen_uuri.clone(), pub_listener)
+        .unregister_listener(&listen_uuri.clone(), None, pub_listener)
         .await
         .unwrap();
 }
 
-#[test_case(test_lib::create_utransport_uuri(Some(2), 2, 2), test_lib::create_utransport_uuri(Some(3), 3, 3), test_lib::create_utransport_uuri(Some(3), 3, 3); "Normal UUri")]
-#[test_case(test_lib::create_utransport_uuri(Some(2), 2, 2), test_lib::create_utransport_uuri(Some(3), 3, 3), test_lib::create_special_uuri(3); "Special UUri")]
+#[test_case(&test_lib::new_uuri("sender", 1, 1, 0x8000), &test_lib::new_uuri("receiver", 2, 1, 0), &test_lib::new_uuri("*", 0xFFFF, 0xFF, 0xFFFF), Some(&test_lib::new_uuri("receiver", 2, 1, 0)); "Any source UUri")]
+#[test_case(&test_lib::new_uuri("sender", 1, 1, 0x8000), &test_lib::new_uuri("receiver", 2, 1, 0), &test_lib::new_uuri("sender", 1, 1, 0x8000), Some(&test_lib::new_uuri("receiver", 2, 1, 0)); "Specific source UUri")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_notification_and_subscribe(origin_uuri: UUri, dst_uuri: UUri, listen_uuri: UUri) {
+async fn test_notification_and_subscribe(
+    src_uuri: &UUri,
+    sink_uuri: &UUri,
+    src_filter: &UUri,
+    sink_filter: Option<&UUri>,
+) {
     test_lib::before_test();
 
     // Initialization
     let target_data = String::from("Hello World!");
-    let upclient_notify = test_lib::create_up_client_zenoh(2, 2).await.unwrap();
-    let upclient_recv = test_lib::create_up_client_zenoh(3, 3).await.unwrap();
+    let upclient_sender = test_lib::create_up_client_zenoh("sender").await.unwrap();
+    let upclient_receiver = test_lib::create_up_client_zenoh("receiver").await.unwrap();
 
     // Register the listener
     let notification_listener = Arc::new(PublishNotificationListener::new());
-    upclient_recv
-        .register_listener(listen_uuri.clone(), notification_listener.clone())
+    upclient_receiver
+        .register_listener(src_filter, sink_filter, notification_listener.clone())
         .await
         .unwrap();
     // Waiting for listener to take effect
     sleep(Duration::from_millis(1000)).await;
 
     // Send UMessage
-    let umessage = UMessageBuilder::notification(origin_uuri.clone(), dst_uuri.clone())
-        .build_with_payload(
-            target_data.as_bytes().to_vec().into(),
-            UPayloadFormat::UPAYLOAD_FORMAT_TEXT,
-        )
+    let umessage = UMessageBuilder::notification((*src_uuri).clone(), (*sink_uuri).clone())
+        .build_with_payload(target_data.clone(), UPayloadFormat::UPAYLOAD_FORMAT_TEXT)
         .unwrap();
-    upclient_notify.send(umessage).await.unwrap();
+    upclient_sender.send(umessage).await.unwrap();
 
     // Waiting for the subscriber to receive data
     sleep(Duration::from_millis(1000)).await;
@@ -126,8 +122,8 @@ async fn test_notification_and_subscribe(origin_uuri: UUri, dst_uuri: UUri, list
     assert_eq!(notification_listener.get_recv_data(), target_data);
 
     // Cleanup
-    upclient_recv
-        .unregister_listener(listen_uuri.clone(), notification_listener)
+    upclient_receiver
+        .unregister_listener(src_filter, sink_filter, notification_listener)
         .await
         .unwrap();
 }

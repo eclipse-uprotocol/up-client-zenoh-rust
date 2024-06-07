@@ -13,102 +13,78 @@
 use crate::UPClientZenoh;
 use async_trait::async_trait;
 use std::{string::ToString, time::Duration};
-use up_rust::{
-    CallOptions, Data, RpcClient, RpcClientResult, RpcMapperError, UAttributes, UMessage, UPayload,
-    UUIDBuilder, UUri, UriValidator,
-};
-use zenoh::prelude::r#async::*;
+use up_rust::{RpcClient, RpcClientResult, UAttributesError, UMessage, UMessageError, UUri};
+use zenoh::{prelude::*, query::QueryTarget, sample::ValueBuilderTrait};
 
 #[async_trait]
 impl RpcClient for UPClientZenoh {
-    async fn invoke_method(
-        &self,
-        topic: UUri,
-        payload: UPayload,
-        options: CallOptions,
-    ) -> RpcClientResult {
-        // Validate UUri
-        UriValidator::validate(&topic).map_err(|_| {
-            let msg = "Invalid UUri for invoke_method".to_string();
-            log::error!("{msg}");
-            RpcMapperError::UnexpectedError(msg)
-        })?;
-
+    // CY_TODO: Should remove method in the future
+    async fn invoke_method(&self, _method: UUri, request: UMessage) -> RpcClientResult {
         // Get Zenoh key
-        let Ok(zenoh_key) = UPClientZenoh::to_zenoh_key_string(&topic) else {
-            let msg = "Unable to transform UUri to Zenoh key".to_string();
+        let source = *request.attributes.source.0.clone().ok_or_else(|| {
+            let msg = "attributes.source should not be empty".to_string();
             log::error!("{msg}");
-            return Err(RpcMapperError::UnexpectedError(msg));
+            UMessageError::PayloadError(msg)
+        })?;
+        let zenoh_key = if let Some(sink) = request.attributes.sink.0.clone() {
+            self.to_zenoh_key_string(&source, Some(&sink))
+        } else {
+            self.to_zenoh_key_string(&source, None)
         };
 
         // Create UAttributes and put into Zenoh user attachment
-        let uattributes = UAttributes::request(
-            UUIDBuilder::build(),
-            topic,
-            self.get_response_uuri(),
-            options.clone(),
-        );
-        let Ok(attachment) = UPClientZenoh::uattributes_to_attachment(&uattributes) else {
+        let attributes = *request.attributes.0.clone().ok_or_else(|| {
+            let msg = "Invalid UAttributes".to_string();
+            log::error!("{msg}");
+            UMessageError::AttributesValidationError(UAttributesError::ParsingError(msg))
+        })?;
+        let Ok(attachment) = UPClientZenoh::uattributes_to_attachment(&attributes) else {
             let msg = "Unable to transform UAttributes to user attachment in Zenoh".to_string();
             log::error!("{msg}");
-            return Err(RpcMapperError::UnexpectedError(msg));
+            return Err(UMessageError::AttributesValidationError(
+                UAttributesError::ParsingError(msg),
+            ));
         };
 
         // Get the data from UPayload
-        let Some(Data::Value(buf)) = payload.data else {
-            // Assume we only have Value here, no reference for shared memory
-            let msg = "The data in UPayload should be Data::Value".to_string();
-            log::error!("{msg}");
-            return Err(RpcMapperError::InvalidPayload(msg));
+        let value = if let Some(payload) = request.payload {
+            payload.to_vec()
+        } else {
+            vec![]
         };
-        let value = Value::new(buf.into()).encoding(Encoding::WithSuffix(
-            KnownEncoding::AppCustom,
-            payload.format.value().to_string().into(),
-        ));
 
         // Send the query
-        let getbuilder = self
+        let mut getbuilder = self
             .session
             .get(&zenoh_key)
-            .with_value(value)
-            .with_attachment(attachment.build())
-            .target(QueryTarget::BestMatching)
-            .timeout(Duration::from_millis(u64::from(options.ttl)));
-        let Ok(replies) = getbuilder.res().await else {
+            .value(value)
+            .attachment(attachment)
+            .target(QueryTarget::BestMatching);
+        if let Some(ttl) = request.attributes.ttl {
+            getbuilder = getbuilder.timeout(Duration::from_millis(u64::from(ttl)));
+        }
+        let Ok(replies) = getbuilder.await else {
             let msg = "Error while sending Zenoh query".to_string();
             log::error!("{msg}");
-            return Err(RpcMapperError::UnexpectedError(msg));
+            return Err(UMessageError::PayloadError(msg));
         };
 
         // Receive the reply
         let Ok(reply) = replies.recv_async().await else {
             let msg = "Error while receiving Zenoh reply".to_string();
             log::error!("{msg}");
-            return Err(RpcMapperError::UnexpectedError(msg));
+            return Err(UMessageError::PayloadError(msg));
         };
-        match reply.sample {
-            Ok(sample) => {
-                let Some(encoding) = UPClientZenoh::to_upayload_format(&sample.encoding) else {
-                    let msg = "Error while parsing Zenoh encoding".to_string();
-                    log::error!("{msg}");
-                    return Err(RpcMapperError::UnexpectedError(msg));
-                };
-                Ok(UMessage {
-                    attributes: Some(uattributes).into(),
-                    payload: Some(UPayload {
-                        length: Some(0),
-                        format: encoding.into(),
-                        data: Some(Data::Value(sample.payload.contiguous().to_vec())),
-                        ..Default::default()
-                    })
-                    .into(),
-                    ..Default::default()
-                })
-            }
+        match reply.result() {
+            Ok(sample) => Ok(UMessage {
+                attributes: Some(attributes).into(),
+                payload: Some(sample.payload().into::<Vec<u8>>().into()),
+                ..Default::default()
+            }),
             Err(e) => {
                 let msg = format!("Error while parsing Zenoh reply: {e:?}");
                 log::error!("{msg}");
-                Err(RpcMapperError::UnexpectedError(msg))
+                Err(UMessageError::PayloadError(msg))
             }
         }
     }

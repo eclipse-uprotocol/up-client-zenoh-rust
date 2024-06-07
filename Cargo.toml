@@ -36,8 +36,8 @@ pedantic = "deny"
 
 [dependencies]
 anyhow = "1.0.75"
-tokio = { version = "1.35.1", default-features = false }
 async-trait = "0.1"
+bitmask-enum = "2.2.4"
 chrono = "0.4.31"
 crossbeam-channel = "0.5.12"
 env_logger = "0.10.0"
@@ -47,8 +47,10 @@ prost = "0.12"
 prost-types = "0.12"
 protobuf = { version = "3.3" }
 rand = "0.8.5"
-up-rust = { git = "https://github.com/eclipse-uprotocol/up-rust", rev = "1bb08ba7a3666e58c316489fbcf3da3e29dee611" }
-zenoh = { version = "0.11.0-rc.3", features = ["unstable"]}
+tokio = { version = "1.35.1", default-features = false }
+up-rust = { git = "https://github.com/eclipse-uprotocol/up-rust", rev = "d736fdf35ff4728effa7f36b720f0fc1605d5ba0" }
+#zenoh = { version = "0.11.0-rc.3", features = ["unstable"]}
+zenoh = { git = "https://github.com/eclipse-zenoh/zenoh", rev = "04f05cb29e9b211f785c5949b6d241e03e369acb", features = ["unstable"] }
 
 [dev-dependencies]
 test-case = { version = "3.3" }
